@@ -23,6 +23,11 @@
     Skip files larger than ~500 MB (the full NVIDIA driver).
     Useful for a quick test run.
 
+.PARAMETER NoPause
+    Do not wait for Enter before closing. By default the script pauses at
+    the end (and on fatal errors) so the window stays readable when the
+    script is started by double-click / "Run with PowerShell".
+
 .EXAMPLE
     .\_USB-Diagnostic-Toolkit.ps1 -SkipLarge
     .\_USB-Diagnostic-Toolkit.ps1 -Destination "E:\"
@@ -30,8 +35,25 @@
 [CmdletBinding()]
 param(
     [string]$Destination,
-    [switch]$SkipLarge
+    [switch]$SkipLarge,
+    [switch]$NoPause
 )
+
+function Wait-BeforeClose {
+    if (-not $NoPause) {
+        Write-Host ''
+        Read-Host 'Press Enter to close' | Out-Null
+    }
+}
+
+# Fatal errors outside the per-item handling land here; show them instead of
+# letting the console window vanish instantly when run via double-click
+trap {
+    Write-Host "`nFATAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    Wait-BeforeClose
+    exit 1
+}
 
 if (-not $Destination) {
     $Destination = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -514,3 +536,5 @@ $current = @($Results | Where-Object Status -eq 'CURRENT').Count
 $fail    = @($Results | Where-Object Status -eq 'FAILED').Count
 $skip    = @($Results | Where-Object Status -eq 'SKIPPED').Count
 Write-Host ("{0} downloaded, {1} already up to date, {2} failed, {3} skipped." -f $ok, $current, $fail, $skip) -ForegroundColor Cyan
+
+Wait-BeforeClose
