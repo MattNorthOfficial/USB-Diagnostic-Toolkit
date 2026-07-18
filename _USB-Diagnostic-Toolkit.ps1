@@ -23,8 +23,8 @@
     Useful for a quick test run.
 
 .EXAMPLE
-    .\'_USB Toolkit.ps1' -SkipLarge
-    .\'_USB Toolkit.ps1' -Destination "E:\"
+    .\_USB-Diagnostic-Toolkit.ps1 -SkipLarge
+    .\_USB-Diagnostic-Toolkit.ps1 -Destination "E:\"
 #>
 [CmdletBinding()]
 param(
