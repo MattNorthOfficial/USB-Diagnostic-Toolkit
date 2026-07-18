@@ -1,0 +1,6 @@
+# Everything the script downloads/generates - only the script itself is tracked
+BIOS, drivers, scripts & software/
+Backup Ventoy & Rufus/
+ventoy/
+memtest86-usb.img
+*.part
