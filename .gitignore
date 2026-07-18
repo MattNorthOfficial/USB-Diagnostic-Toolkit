@@ -3,5 +3,5 @@ BIOS, drivers, scripts & software/
 Backup Ventoy & Rufus/
 ventoy/
 memtest86-usb.img
-.toolkit-state.json
+zzz_toolkit-state.json
 *.part
