@@ -8,6 +8,9 @@
     the LATEST version of every tool, resolved live from vendor sites, GitHub
     and TechPowerUp. If a "latest version" lookup fails, the script falls back
     to a known-good pinned URL so the run still completes.
+    Files that are already up to date are skipped without re-downloading:
+    version-stamped items are matched by name, and fixed-name items are
+    tracked in a small hidden state file (.toolkit-state.json).
     When a newer version replaces an older one, the outdated files/folders
     are removed after the new download succeeds, so re-runs keep the
     destination clean. A per-item summary is printed at the end of each run.
@@ -63,6 +66,7 @@ function Add-Result([string]$Name, [string]$Status, [string]$Detail = '') {
     $Results.Add([pscustomobject]@{ Item = $Name; Status = $Status; Detail = $Detail })
     $color = switch ($Status) {
         'OK'      { 'Green' }
+        'CURRENT' { 'Cyan' }
         'SKIPPED' { 'Yellow' }
         default   { 'Red' }
     }
@@ -177,6 +181,22 @@ function Get-PageMatch([string]$PageUrl, [string]$Regex) {
     if ($m.Success) { $m.Value } else { $null }
 }
 
+# Fingerprint of a remote file (ETag / Last-Modified / total size) obtained
+# from a 1-byte range request, so servers that reject HEAD still answer.
+# Returns $null when the server gives nothing usable.
+function Get-RemoteSignature([string]$Url, [string]$UserAgent = $BrowserUA) {
+    $headers = & $Curl -sL -r 0-0 -D - -o NUL -A $UserAgent --connect-timeout 20 --max-time 60 $Url 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $headers) { return $null }
+    $etag = ''; $lastMod = ''; $size = ''
+    foreach ($line in $headers) {
+        if ($line -match '^ETag:\s*(.+?)\s*$')                       { $etag = $Matches[1] }
+        elseif ($line -match '^Last-Modified:\s*(.+?)\s*$')          { $lastMod = $Matches[1] }
+        elseif ($line -match '^Content-Range:\s*bytes\s+\S+/(\d+)')  { $size = $Matches[1] }
+    }
+    if (-not ($etag -or $lastMod -or $size)) { return $null }
+    "$etag|$lastMod|$size"
+}
+
 Write-Host "`nResolving latest versions...`n" -ForegroundColor Cyan
 
 $amdUrl = Resolve-Latest 'AMD Adrenalin (web installer)' {
@@ -275,14 +295,29 @@ $Dirs.Values | ForEach-Object { New-Dir $_ }
 Get-ChildItem -Path $Destination -Recurse -Filter '*.part' -File -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
+# Up-to-date tracking: remembers which URL produced each fixed-name file so
+# unchanged files can be skipped on re-runs (hidden file at the destination)
+$StatePath = Join-Path $Destination '.toolkit-state.json'
+$State = @{}
+if (Test-Path -LiteralPath $StatePath) {
+    try {
+        (Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { $State[$_.Name] = $_.Value }
+    } catch { }
+}
+
 # ------------------------------------------------- plain direct downloads ---
 
 # Clean* keys: after a successful download, older versions matching
 # CleanPattern (except the fresh file/folder) are removed from CleanDir.
+# Up-to-date detection: items whose file/folder name contains the version are
+# marked SkipIfPresent (present = current). Fixed-name items are compared
+# against the state file; Static marks items whose URL never changes, so the
+# remote file fingerprint decides whether a new download is needed.
 # The list is processed in alphabetical order (sorted by Name below).
 $Manifest = @(
     @{ Name = "AMD Adrenalin web installer ($amdFile)"; Dir = $Dirs.DrvAmd
-       File = $amdFile; Url = $amdUrl
+       File = $amdFile; Url = $amdUrl; SkipIfPresent = $true
        Referer = 'https://www.amd.com/en/support/download/drivers.html'
        CleanDir = $Dirs.DrvAmd; CleanPattern = 'amd-software-*.exe'; CleanKeep = $amdFile }
     @{ Name = 'CPU-Z (cpuz_x64.exe)'; Dir = $Dirs.Software; Zip = $true; OnlyFile = 'cpuz_x64.exe'
@@ -292,9 +327,10 @@ $Manifest = @(
     # unpacked into its own folder
     @{ Name = "DDU ($dduDirName)"; Dir = (Join-Path $Dirs.Software $dduDirName)
        Sfx = $true; SfxMainFile = 'Display Driver Uninstaller.exe'; Ua = $WingetUA; Url = $dduUrl
+       SkipIfPresent = $true
        CleanDir = $Dirs.Software; CleanPattern = 'DDU*'; CleanKeep = $dduDirName }
     @{ Name = "GPU-Z ($gpuzFile)"; Dir = $Dirs.Software
-       File = $gpuzFile; Ua = $WingetUA; Url = $gpuzUrl
+       File = $gpuzFile; Ua = $WingetUA; Url = $gpuzUrl; SkipIfPresent = $true
        CleanDir = $Dirs.Software; CleanPattern = 'GPU-Z.*.exe'; CleanKeep = $gpuzFile }
     @{ Name = 'HWiNFO (HWiNFO64.exe)'; Dir = $Dirs.Software; Zip = $true; OnlyFile = 'HWiNFO64.exe'
        Url = $hwiUrl
@@ -302,32 +338,33 @@ $Manifest = @(
     @{ Name = 'Intel Chipset INF Utility (SetupChipset.exe)'; Dir = $Dirs.DrvIntel
        File = 'SetupChipset.exe'; Url = $intelUrl }
     @{ Name = 'Intel Driver & Support Assistant'; Dir = $Dirs.DrvIntel
-       File = 'Intel-Driver-and-Support-Assistant-Installer.exe'
+       File = 'Intel-Driver-and-Support-Assistant-Installer.exe'; Static = $true
        Url = 'https://dsadata.intel.com/installer' }
     @{ Name = 'MemTest86 USB image'; Dir = $Dirs.Root; Zip = $true; OnlyFile = 'memtest86-usb.img'
+       Static = $true
        Url = 'https://www.memtest86.com/downloads/memtest86-usb.zip' }
     @{ Name = "NVCleanstall ($nvcFile)"; Dir = $Dirs.Software
-       File = $nvcFile; Ua = $WingetUA; Url = $nvcUrl
+       File = $nvcFile; Ua = $WingetUA; Url = $nvcUrl; SkipIfPresent = $true
        CleanDir = $Dirs.Software; CleanPattern = 'NVCleanstall_*.exe'; CleanKeep = $nvcFile }
     @{ Name = "NVIDIA App ($nvAppFile)"; Dir = $Dirs.DrvNv
-       File = $nvAppFile; Url = $nvAppUrl
+       File = $nvAppFile; Url = $nvAppUrl; SkipIfPresent = $true
        CleanDir = $Dirs.DrvNv; CleanPattern = 'NVIDIA_app_v*.exe'; CleanKeep = $nvAppFile }
     @{ Name = "NVIDIA Game Ready driver ($nvDriverFile)"; Dir = $Dirs.DrvNv; Large = $true
-       File = $nvDriverFile; Url = $nvDriverUrl
+       File = $nvDriverFile; Url = $nvDriverUrl; SkipIfPresent = $true
        CleanDir = $Dirs.DrvNv; CleanPattern = '*-desktop-win10-win11-*.exe'; CleanKeep = $nvDriverFile }
     @{ Name = 'NVIDIA Profile Inspector (nvidiaProfileInspector.exe)'; Dir = $Dirs.Software; Zip = $true
-       OnlyFile = 'nvidiaProfileInspector.exe'
+       OnlyFile = 'nvidiaProfileInspector.exe'; Static = $true
        Url = 'https://github.com/Orbmu2k/nvidiaProfileInspector/releases/latest/download/nvidiaProfileInspector.zip'
        CleanDir = $Dirs.Software; CleanPattern = 'nvidiaProfileInspector'; CleanKeep = '' }
     @{ Name = "Rufus ($rufusFile)"; Dir = $Dirs.Backup
-       File = $rufusFile; Url = $rufusUrl
+       File = $rufusFile; Url = $rufusUrl; SkipIfPresent = $true
        CleanDir = $Dirs.Backup; CleanPattern = 'rufus-*.exe'; CleanKeep = $rufusFile }
     @{ Name = "Ventoy ($ventoyInner)"; Dir = (Join-Path $Dirs.Backup "$ventoyDir\$ventoyInner"); Zip = $true
-       Url = $ventoyUrl
+       Url = $ventoyUrl; SkipIfPresent = $true
        CleanDir = $Dirs.Backup; CleanPattern = 'ventoy-*-windows'; CleanKeep = $ventoyDir }
     # ZenTimings needs its bundled DLLs, so it gets its own folder
     @{ Name = "ZenTimings ($zenDirName)"; Dir = (Join-Path $Dirs.Software $zenDirName); Zip = $true
-       Url = $zenUrl
+       Url = $zenUrl; SkipIfPresent = $true
        CleanDir = $Dirs.Software; CleanPattern = 'ZenTimings_v*'; CleanKeep = $zenDirName }
 ) | Sort-Object { $_.Name }
 
@@ -340,6 +377,37 @@ foreach ($item in $Manifest) {
             continue
         }
         $ua = if ($item.Ua) { $item.Ua } else { $BrowserUA }
+
+        # ---- up-to-date check: skip when the local copy is already current ----
+        $artifact = if ($item.File)     { Join-Path $item.Dir $item.File }
+                    elseif ($item.OnlyFile) { Join-Path $item.Dir $item.OnlyFile }
+                    else                { $item.Dir }
+        $exists = Test-Path -LiteralPath $artifact
+        if ($exists -and -not ($item.File -or $item.OnlyFile)) {
+            # folder artifacts only count when they have contents
+            $exists = @(Get-ChildItem -LiteralPath $artifact -Force -ErrorAction SilentlyContinue).Count -gt 0
+        }
+        if ($exists) {
+            $upToDate = $null
+            $prev = $State[$item.Name]
+            if ($item.SkipIfPresent) {
+                $upToDate = 'latest version already present'
+            }
+            elseif ($prev -and $prev.Url -eq $item.Url) {
+                if ($item.Static) {
+                    $sig = Get-RemoteSignature $item.Url $ua
+                    if ($sig -and $sig -eq $prev.Sig) { $upToDate = 'remote file unchanged' }
+                }
+                else {
+                    $upToDate = 'already downloaded from this version'
+                }
+            }
+            if ($upToDate) {
+                Add-Result $item.Name 'CURRENT' $upToDate
+                continue
+            }
+        }
+
         if ($item.Zip) {
             $zipPath = Join-Path $TempDir (([uri]$item.Url).Segments[-1])
             Invoke-Download -Url $item.Url -OutFile $zipPath -UserAgent $ua -Referer $item.Referer
@@ -361,6 +429,10 @@ foreach ($item in $Manifest) {
             Invoke-Download -Url $item.Url -OutFile (Join-Path $item.Dir $item.File) -UserAgent $ua -Referer $item.Referer
         }
         Add-Result $item.Name 'OK'
+        $State[$item.Name] = @{
+            Url = $item.Url
+            Sig = if ($item.Static) { Get-RemoteSignature $item.Url $ua } else { $null }
+        }
         if ($item.CleanPattern) {
             Remove-OldVersions $item.CleanDir $item.CleanPattern $item.CleanKeep
         }
@@ -369,6 +441,14 @@ foreach ($item in $Manifest) {
         Add-Result $item.Name 'FAILED' $_.Exception.Message
     }
 }
+
+# Persist the up-to-date tracking state (hidden file; recreated each run)
+try {
+    if (Test-Path -LiteralPath $StatePath) { Remove-Item -LiteralPath $StatePath -Force }
+    $State | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
+    (Get-Item -LiteralPath $StatePath -Force).Attributes = 'Hidden, Archive'
+}
+catch { }
 
 # ----------------------------------------- recreated shortcuts and configs --
 
@@ -420,7 +500,8 @@ Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "`n===================== SUMMARY =====================" -ForegroundColor Cyan
 $Results | Format-Table -AutoSize
-$ok     = @($Results | Where-Object Status -eq 'OK').Count
-$fail   = @($Results | Where-Object Status -eq 'FAILED').Count
-$skip   = @($Results | Where-Object Status -eq 'SKIPPED').Count
-Write-Host ("{0} succeeded, {1} failed, {2} skipped." -f $ok, $fail, $skip) -ForegroundColor Cyan
+$ok      = @($Results | Where-Object Status -eq 'OK').Count
+$current = @($Results | Where-Object Status -eq 'CURRENT').Count
+$fail    = @($Results | Where-Object Status -eq 'FAILED').Count
+$skip    = @($Results | Where-Object Status -eq 'SKIPPED').Count
+Write-Host ("{0} downloaded, {1} already up to date, {2} failed, {3} skipped." -f $ok, $current, $fail, $skip) -ForegroundColor Cyan
