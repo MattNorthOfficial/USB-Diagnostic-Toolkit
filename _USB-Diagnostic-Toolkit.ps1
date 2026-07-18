@@ -10,8 +10,8 @@
     to a known-good pinned URL so the run still completes.
     Files that are already up to date are skipped without re-downloading:
     version-stamped items are matched by name, and fixed-name items are
-    tracked in a small hidden state file (zzz_toolkit-state.json, named so
-    it sorts last in Explorer).
+    tracked in a small hidden state file kept out of the root, at
+    "BIOS, drivers, scripts & software\toolkit-state.json".
     When a newer version replaces an older one, the outdated files/folders
     are removed after the new download succeeds, so re-runs keep the
     destination clean. A per-item summary is printed at the end of each run.
@@ -297,13 +297,15 @@ Get-ChildItem -Path $Destination -Recurse -Filter '*.part' -File -ErrorAction Si
     Remove-Item -Force -ErrorAction SilentlyContinue
 
 # Up-to-date tracking: remembers which URL produced each fixed-name file so
-# unchanged files can be skipped on re-runs (hidden file at the destination,
-# zzz-prefixed so it sorts to the bottom in Explorer)
-$StatePath = Join-Path $Destination 'zzz_toolkit-state.json'
-# migrate the state file from its previous name
-$oldStatePath = Join-Path $Destination '.toolkit-state.json'
-if ((Test-Path -LiteralPath $oldStatePath) -and -not (Test-Path -LiteralPath $StatePath)) {
-    Rename-Item -LiteralPath $oldStatePath -NewName 'zzz_toolkit-state.json' -Force
+# unchanged files can be skipped on re-runs (hidden file, kept inside the
+# toolkit folder so the destination root stays clean)
+$StatePath = Join-Path $ToolkitDir 'toolkit-state.json'
+# migrate the state file from previous names/locations at the root
+foreach ($oldName in 'zzz_toolkit-state.json', '.toolkit-state.json') {
+    $oldStatePath = Join-Path $Destination $oldName
+    if ((Test-Path -LiteralPath $oldStatePath) -and -not (Test-Path -LiteralPath $StatePath)) {
+        Move-Item -LiteralPath $oldStatePath -Destination $StatePath -Force
+    }
 }
 $State = @{}
 if (Test-Path -LiteralPath $StatePath) {
